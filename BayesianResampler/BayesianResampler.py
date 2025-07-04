@@ -364,10 +364,10 @@ class BayesianBlocksResampler:
     The approach works by:
     1. Finding optimal blocks using Bayesian blocks algorithm
     2. Calculating density within each block
-    3. Oversampling underrepresented blocks to achieve target uniformity
+    3. Resampling to approach uniform density across blocks
     
-    Note: This implementation only oversamples (never undersamples) to preserve
-    all original data diversity while addressing imbalanced distributions.
+    This is particularly useful when you have rare but valuable samples
+    (e.g., high-affinity molecules) that you want your model to learn from.
     """
     
     def __init__(self, target_uniformity: float = 0.75, 
@@ -380,9 +380,9 @@ class BayesianBlocksResampler:
         Parameters:
         -----------
         target_uniformity : float, default=0.8
-            How much to boost underrepresented regions (0=no change, 1=perfectly uniform).
-            A value of 0.8 means underrepresented blocks will be oversampled to reach
-            75% of what they would need for perfect uniformity.
+            How uniform to make the distribution (0=no change, 1=perfectly uniform).
+            A value of 0.8 means we'll aim for 80% uniformity, keeping some of the
+            original distribution shape while significantly reducing imbalance.
             
         random_state : int or None, default=None
             Random seed for reproducibility
@@ -403,7 +403,7 @@ class BayesianBlocksResampler:
         
         if random_state is not None:
             np.random.seed(random_state)
-    
+        
     def find_optimal_alpha(self, y: np.ndarray, 
                           initial_points: int = 100,
                           refinement_levels: int = 3,
@@ -413,7 +413,7 @@ class BayesianBlocksResampler:
         
         This method explores the alpha parameter space efficiently by:
         1. Starting with a coarse grid over a wide range
-        2. Identifying promising regions with high MI in parallel
+        2. Identifying promising regions with high MI
         3. Refining the search in those regions
         
         Parameters:
@@ -481,6 +481,7 @@ class BayesianBlocksResampler:
             
             # For the next level, refine around the best regions
             if level < refinement_levels - 1:
+                # Find local maxima in the scores
                 level_scores = np.array(level_scores)
                 
                 # Identify promising regions (local maxima)
@@ -505,6 +506,7 @@ class BayesianBlocksResampler:
                         alpha_low = current_alphas[idx - 1]
                         alpha_high = current_alphas[idx + 1]
                     else:
+                        # Edge cases
                         alpha_center = current_alphas[idx]
                         alpha_low = alpha_center * 0.5
                         alpha_high = alpha_center * 2.0
@@ -517,6 +519,7 @@ class BayesianBlocksResampler:
                     )
                     new_alphas.extend(fine_alphas)
                 
+                # Remove duplicates and sort
                 current_alphas = np.unique(new_alphas)
                 
                 if verbose:
@@ -529,7 +532,7 @@ class BayesianBlocksResampler:
         """
         Create blocks using Bayesian blocks algorithm and calculate block statistics.
         
-        This method uses the new oversampling-only strategy.
+        This method partitions the data and computes density information for each block.
         """
         if alpha is None:
             alpha = self.alpha_
@@ -560,20 +563,14 @@ class BayesianBlocksResampler:
             # Calculate current density (samples per unit of y)
             current_density = n_samples / block_range if block_range > 0 else 0
             
-            # New strategy: Only oversample underrepresented blocks
-            if current_density < uniform_density:
-                # Calculate how much to boost this block
-                target_density = (
-                    current_density + 
-                    self.target_uniformity * (uniform_density - current_density)
-                )
-                target_samples = int(np.round(target_density * block_range))
-            else:
-                # Keep all samples in well-represented blocks
-                target_samples = n_samples
+            # Calculate target density (blend between current and uniform)
+            target_density = (
+                (1 - self.target_uniformity) * current_density + 
+                self.target_uniformity * uniform_density
+            )
             
-            # Ensure we never downsample
-            target_samples = max(target_samples, n_samples)
+            # How many samples should this block have?
+            target_samples = int(np.round(target_density * block_range))
             
             block_info = BlockInfo(
                 lower_edge=edges[i],
@@ -596,8 +593,16 @@ class BayesianBlocksResampler:
         """
         Fit the resampler and return resampled data in the same format as input.
         
-        This method now uses an oversampling-only strategy to preserve all original
-        data diversity while addressing imbalanced distributions.
+        This is the main method that orchestrates the entire process:
+        1. Optionally finds optimal alpha
+        2. Creates blocks
+        3. Resamples to achieve target uniformity
+
+        This method now handles different data types:
+        - pandas DataFrame/Series → returns DataFrame/Series
+        - AnnData object → returns AnnData object
+        - Sparse matrix → returns numpy array (with warning)
+        - numpy array → returns numpy array
         
         Parameters:
         -----------
@@ -606,7 +611,7 @@ class BayesianBlocksResampler:
         y : array-like, Series, or 1D array
             Target values
         find_alpha : bool, default=True
-            Whether to find optimal alpha using parallel search
+            Whether to find optimal alpha
         alpha : float or None
             Alpha value to use if find_alpha is False
         verbose : bool, default=False
@@ -627,7 +632,6 @@ class BayesianBlocksResampler:
             # Simple conversion without metadata preservation
             X_array = np.asarray(X)
             y_array = np.asarray(y).ravel()
-        
         if len(X_array) != len(y_array):
             raise ValueError("X and y must have the same number of samples")
         
@@ -654,12 +658,12 @@ class BayesianBlocksResampler:
         """
         Core resampling logic that works with numpy arrays.
         
-        This now implements the oversampling-only strategy.
+        This contains all the logic from the original implementation.
         """
         # Step 1: Find optimal alpha if requested
         if find_alpha:
             if verbose:
-                print("Finding optimal alpha value using parallel search...")
+                print("Finding optimal alpha value...")
             self.find_optimal_alpha(y, verbose=verbose)
         elif alpha is not None:
             self.alpha_ = alpha
@@ -671,15 +675,15 @@ class BayesianBlocksResampler:
         
         if verbose:
             print(f"Created {len(blocks_info)} blocks")
-            print("\nBlock statistics (oversampling-only strategy):")
-            print("Block | Range | Current Samples | Target Samples | Oversample Ratio")
-            print("-" * 75)
+            print("\nBlock statistics:")
+            print("Block | Range | Current Samples | Target Samples | Density Change")
+            print("-" * 70)
             for i, block in enumerate(blocks_info):
                 ratio = block.target_samples / max(block.n_samples, 1)
                 print(f"{i+1:5d} | [{block.lower_edge:6.2f}, {block.upper_edge:6.2f}] | "
-                      f"{block.n_samples:15d} | {block.target_samples:14d} | {ratio:16.2f}x")
+                      f"{block.n_samples:15d} | {block.target_samples:14d} | {ratio:14.2f}x")
         
-        # Step 3: Resample within each block (oversampling only)
+        # Step 3: Resample within each block
         X_resampled = []
         y_resampled = []
         
@@ -691,6 +695,7 @@ class BayesianBlocksResampler:
             block_X = X[block.indices]
             block_y = y[block.indices]
             
+            # Determine how to sample
             if block.target_samples > block.n_samples:
                 # Oversample: sample with replacement
                 resample_indices = np.random.choice(
@@ -699,10 +704,15 @@ class BayesianBlocksResampler:
                     replace=True
                 )
             else:
-                # Keep all samples (no downsampling)
-                resample_indices = np.arange(block.n_samples)
+                # Undersample: sample without replacement
+                resample_indices = np.random.choice(
+                    block.n_samples, 
+                    size=block.target_samples, 
+                    replace=False
+                )
             
             # Track which original indices we're using
+            # This is crucial for metadata reconstruction
             original_indices = block.indices[resample_indices]
             self._resampling_indices.extend(original_indices)
             
@@ -726,12 +736,7 @@ class BayesianBlocksResampler:
             print(f"\nResampling complete:")
             print(f"Original samples: {len(y)}")
             print(f"Resampled samples: {len(y_resampled)}")
-            print(f"Size increase: {len(y_resampled) / len(y):.2f}x")
-            
-            # Show density improvement
-            original_std = np.std([len(block.indices) for block in blocks_info])
-            resampled_std = np.std([block.target_samples for block in blocks_info])
-            print(f"Block size std deviation: {original_std:.1f} → {resampled_std:.1f}")
+            print(f"Size ratio: {len(y_resampled) / len(y):.2f}x")
         
         return X_resampled, y_resampled
     
@@ -748,7 +753,7 @@ class BayesianBlocksResampler:
 
 
 # Convenience function for simple usage
-def bayesian_blocks_oversample(X: np.ndarray, y: np.ndarray, 
+def bayesian_blocks_resample(X: np.ndarray, y: np.ndarray, 
                            target_uniformity: float = 0.8,
                            random_state: Optional[int] = None,
                            n_jobs: int = -1,
@@ -756,7 +761,7 @@ def bayesian_blocks_oversample(X: np.ndarray, y: np.ndarray,
     """
     Convenience function for resampling data using Bayesian blocks.
     
-    This function uses the new oversampling-only strategy and parallelized alpha discovery.
+    This is a simple wrapper that creates a resampler and runs the full pipeline.
     
     Parameters:
     -----------
@@ -765,7 +770,7 @@ def bayesian_blocks_oversample(X: np.ndarray, y: np.ndarray,
     y : array-like of shape (n_samples,)
         Target values
     target_uniformity : float, default=0.8
-        How much to boost underrepresented regions (0=no change, 1=perfectly uniform)
+        How uniform to make the distribution (0=no change, 1=perfectly uniform)
     random_state : int or None, default=None
         Random seed for reproducibility
     n_jobs : int, default=-1
@@ -776,9 +781,9 @@ def bayesian_blocks_oversample(X: np.ndarray, y: np.ndarray,
     Returns:
     --------
     X_resampled : array-like
-        Resampled feature matrix (same or larger size)
+        Resampled feature matrix
     y_resampled : array-like
-        Resampled target values (same or larger size)
+        Resampled target values
         
     Example:
     --------
@@ -786,7 +791,7 @@ def bayesian_blocks_oversample(X: np.ndarray, y: np.ndarray,
     >>> X, y = make_regression(n_samples=1000, n_features=10, noise=5)
     >>> # Create a long-tailed distribution
     >>> y = np.exp(y / y.std())
-    >>> X_balanced, y_balanced = bayesian_blocks_oversample(X, y, verbose=True)
+    >>> X_balanced, y_balanced = bayesian_blocks_resample(X, y, verbose=True)
     """
     resampler = BayesianBlocksResampler(
         target_uniformity=target_uniformity,
@@ -826,7 +831,7 @@ if __name__ == "__main__":
     
     # Apply Bayesian blocks resampling with parallel alpha discovery
     print("\n" + "="*70)
-    print("Applying Bayesian Blocks Resampling (Oversampling-Only Strategy)")
+    print("Applying Bayesian Blocks Resampling")
     print("="*70)
     
     resampler = BayesianBlocksResampler(
