@@ -356,7 +356,7 @@ def _calculate_mutual_information(y: np.ndarray, block_assignments: np.ndarray) 
     return h_y - h_y_given_block
 
 
-class BayesianBlocksResampler:
+class BayesianBlocksOversampler:
     """
     A class for resampling regression datasets using Bayesian blocks to achieve
     more uniform density distributions, particularly useful for long-tailed data.
@@ -788,7 +788,7 @@ def bayesian_blocks_oversample(X: np.ndarray, y: np.ndarray,
     >>> y = np.exp(y / y.std())
     >>> X_balanced, y_balanced = bayesian_blocks_oversample(X, y, verbose=True)
     """
-    resampler = BayesianBlocksResampler(
+    resampler = BayesianBlocksOversampler(
         target_uniformity=target_uniformity,
         random_state=random_state,
         n_jobs=n_jobs
@@ -829,7 +829,7 @@ if __name__ == "__main__":
     print("Applying Bayesian Blocks Resampling (Oversampling-Only Strategy)")
     print("="*70)
     
-    resampler = BayesianBlocksResampler(
+    resampler = BayesianBlocksOversampler(
         target_uniformity=0.5, 
         random_state=42,
         # n_jobs=4  # Use 4 cores for demonstration
